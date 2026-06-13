@@ -4,7 +4,7 @@ import AppShell from '@/components/layout/AppShell'
 import { supabase } from '@/lib/supabase'
 import { eur } from '@/lib/utils'
 import {
-  PageHeader, StatusBadge, CatBadge, OwnerBadge, Table, Thead, Th, Tbody, Tr, Td,
+  PageHeader, CatBadge, OwnerBadge, Table, Thead, Th, Tbody, Tr, Td,
   EmptyState, Modal, FormField, FormGrid, ConfirmModal
 } from '@/components/ui'
 import { Plus, Pencil, Trash2, Wrench, Puzzle, Search, ChevronDown } from 'lucide-react'

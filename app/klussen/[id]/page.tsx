@@ -1,5 +1,5 @@
 'use client'
-import { useEffect, useState, use } from 'react'
+import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import AppShell from '@/components/layout/AppShell'
 import { supabase } from '@/lib/supabase'
@@ -7,15 +7,15 @@ import { fmt, eur, klusDagwaarde } from '@/lib/utils'
 import { StatusBadge, OwnerBadge, CatBadge, Modal, FormField, FormGrid } from '@/components/ui'
 import {
   ArrowLeft, Plus, X, Search, Check, FileText, Receipt,
-  Truck, Zap, Puzzle, ChevronDown, ChevronUp, Pencil
+  Truck, Zap, Puzzle, Pencil
 } from 'lucide-react'
 import type { Klus, Gear, Accessory, Bus, Generator, Klant } from '@/lib/types'
 import clsx from 'clsx'
 
 const CATS = ['Alle', 'HMI', 'Tungsten', 'LED', 'Textile/Frame', 'Overig']
 
-export default function KlusDetailPage({ params }: { params: Promise<{ id: string }> }) {
-  const { id } = use(params)
+export default function KlusDetailPage({ params }: { params: { id: string } }) {
+  const { id } = params
   const router = useRouter()
   const [klus, setKlus] = useState<Klus | null>(null)
   const [gear, setGear] = useState<Gear[]>([])

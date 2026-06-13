@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 import AppShell from '@/components/layout/AppShell'
 import { supabase } from '@/lib/supabase'
 import { eur, fmt } from '@/lib/utils'
-import { PageHeader, StatCard, Table, Thead, Th, Tbody, Tr, Td, Modal, FormField, FormGrid, OwnerBadge } from '@/components/ui'
+import { PageHeader, Table, Thead, Th, Tbody, Tr, Td, Modal, FormField, FormGrid, OwnerBadge } from '@/components/ui'
 import { Plus, Zap } from 'lucide-react'
 import type { Generator, GeneratorLog } from '@/lib/types'
 
