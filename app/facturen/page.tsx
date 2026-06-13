@@ -1,5 +1,6 @@
 'use client'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, Suspense } from 'react'
+import { useSearchParams } from 'next/navigation'
 import AppShell from '@/components/layout/AppShell'
 import { supabase, logAudit, getCurrentProfiel } from '@/lib/supabase'
 import { eur, fmt, calcDoc, dagsBetween } from '@/lib/utils'
@@ -8,6 +9,7 @@ import { Plus, Eye, Check, Receipt, Trash2, Copy, Bell, AlertCircle, FileText, E
 import type { Factuur, Klant, Gear, Accessory, Profiel } from '@/lib/types'
 
 export default function FacturenPage() {
+  const searchParams = useSearchParams()
   const [facturen, setFacturen] = useState<Factuur[]>([])
   const [klanten, setKlanten] = useState<Klant[]>([])
   const [gear, setGear] = useState<Gear[]>([])
@@ -32,6 +34,16 @@ export default function FacturenPage() {
   const [saving, setSaving] = useState(false)
 
   useEffect(() => { loadAll() }, [])
+
+  // Auto-open from ?nieuw=1&klus=xxx (coming from klus detail page)
+  useEffect(() => {
+    const nieuw = searchParams?.get('nieuw')
+    const klusId = searchParams?.get('klus')
+    if (nieuw === '1' && klusId) {
+      setForm(f => ({ ...f, klus_id: klusId }))
+      setModal(true)
+    }
+  }, [searchParams])
 
   async function loadAll() {
     const [{ data: f }, { data: k }, { data: g }, { data: a }, { data: kl }] = await Promise.all([

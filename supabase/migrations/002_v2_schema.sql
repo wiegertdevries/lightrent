@@ -185,3 +185,10 @@ ON CONFLICT (sleutel) DO NOTHING;
 -- - 'logos' (public)
 -- - 'algemene-voorwaarden' (public)  
 -- - 'gear-fotos' (public)
+
+-- ── KLUS SJABLOON ─────────────────────────────────────────────
+ALTER TABLE klussen ADD COLUMN IF NOT EXISTS is_sjabloon boolean DEFAULT false;
+
+-- ── UPDATE GENERATOR EIGENAREN ────────────────────────────────
+UPDATE generators SET eigenaar = 'Gideon' WHERE naam ILIKE '%60KVA%';
+UPDATE generators SET eigenaar = 'Wiegert' WHERE naam ILIKE '%Honda%' OR naam ILIKE '%EU70%';

@@ -1,5 +1,6 @@
 'use client'
-import { useEffect, useState, useRef } from 'react'
+import { useEffect, useState, useRef, Suspense } from 'react'
+import { useSearchParams } from 'next/navigation'
 import AppShell from '@/components/layout/AppShell'
 import { supabase, logAudit, getCurrentProfiel } from '@/lib/supabase'
 import { eur, fmt, calcDoc, dagsBetween } from '@/lib/utils'
@@ -8,6 +9,7 @@ import { Plus, Eye, Receipt, FileText, Copy, Trash2, CheckCircle, Upload, Downlo
 import type { Offerte, Klant, Gear, Accessory, Profiel } from '@/lib/types'
 
 export default function OffertesPage() {
+  const searchParams = useSearchParams()
   const [offertes, setOffertes] = useState<Offerte[]>([])
   const [klanten, setKlanten] = useState<Klant[]>([])
   const [gear, setGear] = useState<Gear[]>([])
@@ -37,6 +39,17 @@ export default function OffertesPage() {
 
   useEffect(() => { loadAll() }, [])
 
+  // Auto-open new offerte modal if ?nieuw=1&klus=xxx
+  useEffect(() => {
+    const nieuw = searchParams?.get('nieuw')
+    const klusId = searchParams?.get('klus')
+    if (nieuw === '1' && klusId) {
+      const today = new Date().toISOString().slice(0, 10)
+      setForm(f => ({ ...f, klus_id: klusId, start_datum: today, eind_datum: today }))
+      setModal(true)
+    }
+  }, [searchParams])
+
   async function loadAll() {
     const [{ data: o }, { data: k }, { data: g }, { data: a }, { data: kl }, { data: inst }] = await Promise.all([
       supabase.from('offertes').select('*, klant:klanten(naam, bedrijf, adres, btw_nummer)').order('datum', { ascending: false }),
@@ -64,19 +77,27 @@ export default function OffertesPage() {
     if (avData?.waarde) setAvUrl(String(avData.waarde).replace(/"/g, ''))
   }
 
-  async function uploadAv() {
-    if (!avFile) return
+  async function uploadAv(file: File) {
+    if (!file) return
     setUploadingAv(true)
-    const { data, error } = await supabase.storage.from('algemene-voorwaarden').upload(`av_${Date.now()}.pdf`, avFile, { upsert: true })
-    if (!error && data) {
-      const { data: urlData } = supabase.storage.from('algemene-voorwaarden').getPublicUrl(data.path)
-      const url = urlData.publicUrl
-      setAvUrl(url)
-      await supabase.from('instellingen').upsert({ sleutel: 'algemene_voorwaarden_url', waarde: JSON.stringify(url) }, { onConflict: 'sleutel' })
-      setForm(f => ({ ...f, algemene_voorwaarden_url: url }))
+    const filename = `algemene-voorwaarden-${Date.now()}.pdf`
+    const { data, error } = await supabase.storage
+      .from('algemene-voorwaarden')
+      .upload(filename, file, { contentType: 'application/pdf', upsert: true })
+    if (error) {
+      alert(`Upload mislukt: ${error.message}. Controleer of de bucket 'algemene-voorwaarden' bestaat in Supabase Storage.`)
+      setUploadingAv(false)
+      return
     }
+    const { data: urlData } = supabase.storage.from('algemene-voorwaarden').getPublicUrl(filename)
+    const url = urlData.publicUrl
+    setAvUrl(url)
+    await supabase.from('instellingen').upsert(
+      { sleutel: 'algemene_voorwaarden_url', waarde: JSON.stringify(url) },
+      { onConflict: 'sleutel' }
+    )
+    setForm(f => ({ ...f, algemene_voorwaarden_url: url }))
     setUploadingAv(false)
-    setAvFile(null)
   }
 
   async function maakNieuweKlant() {
@@ -200,9 +221,8 @@ export default function OffertesPage() {
             <span>Upload je algemene voorwaarden PDF zodat je die automatisch kunt meesturen bij offertes.</span>
             <label className="btn btn-sm ml-auto cursor-pointer">
               <Upload size={12} /> Upload AV
-              <input type="file" accept=".pdf" className="hidden" onChange={e => { setAvFile(e.target.files?.[0] || null) }} />
+              <input type="file" accept=".pdf" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) uploadAv(f) }} />
             </label>
-            {avFile && <button className="btn btn-sm btn-primary" onClick={uploadAv} disabled={uploadingAv}>{uploadingAv ? 'Uploaden…' : 'Opslaan'}</button>}
           </div>
         )}
 
@@ -215,8 +235,9 @@ export default function OffertesPage() {
                 </a>
               )}
               <label className="btn btn-sm cursor-pointer text-xs">
-                <Upload size={12} /> AV uploaden
-                <input type="file" accept=".pdf" className="hidden" onChange={e => { setAvFile(e.target.files?.[0] || null); if(e.target.files?.[0]) setTimeout(uploadAv, 100) }} />
+                <Upload size={12} /> {uploadingAv ? 'Uploaden…' : 'AV uploaden'}
+                <input type="file" accept=".pdf" className="hidden"
+                  onChange={e => { const f = e.target.files?.[0]; if (f) uploadAv(f) }} />
               </label>
               <button className="btn btn-primary" onClick={openNew}><Plus size={14} /> Nieuwe offerte</button>
             </div>
