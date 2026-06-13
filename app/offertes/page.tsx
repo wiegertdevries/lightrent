@@ -9,6 +9,14 @@ import { Plus, Eye, Receipt, FileText, Copy, Trash2, CheckCircle, Upload, Downlo
 import type { Offerte, Klant, Gear, Accessory, Profiel } from '@/lib/types'
 
 export default function OffertesPage() {
+  return (
+    <Suspense fallback={<div className="p-8 text-ink-400 text-sm">Laden…</div>}>
+      <OffertesInner />
+    </Suspense>
+  )
+}
+
+function OffertesInner() {
   const searchParams = useSearchParams()
   const [offertes, setOffertes] = useState<Offerte[]>([])
   const [klanten, setKlanten] = useState<Klant[]>([])

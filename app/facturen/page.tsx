@@ -8,7 +8,16 @@ import { PageHeader, StatusBadge, Table, Thead, Th, Tbody, Tr, Td, Modal, FormFi
 import { Plus, Eye, Check, Receipt, Trash2, Copy, Bell, AlertCircle, FileText, ExternalLink, UserPlus } from 'lucide-react'
 import type { Factuur, Klant, Gear, Accessory, Profiel } from '@/lib/types'
 
+// Wrap in Suspense because useSearchParams() requires it in Next.js 14
 export default function FacturenPage() {
+  return (
+    <Suspense fallback={<div className="p-8 text-ink-400 text-sm">Laden…</div>}>
+      <FacturenInner />
+    </Suspense>
+  )
+}
+
+function FacturenInner() {
   const searchParams = useSearchParams()
   const [facturen, setFacturen] = useState<Factuur[]>([])
   const [klanten, setKlanten] = useState<Klant[]>([])
