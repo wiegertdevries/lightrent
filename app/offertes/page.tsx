@@ -1,6 +1,6 @@
 'use client'
 import { useEffect, useState, useRef, Suspense } from 'react'
-import { useSearchParams } from 'next/navigation'
+import { useSearchParams, useRouter } from 'next/navigation'
 import AppShell from '@/components/layout/AppShell'
 import { supabase, logAudit, getCurrentProfiel } from '@/lib/supabase'
 import { eur, fmt, calcDoc, dagsBetween } from '@/lib/utils'
@@ -18,6 +18,7 @@ export default function OffertesPage() {
 
 function OffertesInner() {
   const searchParams = useSearchParams()
+  const router = useRouter()
   const [offertes, setOffertes] = useState<Offerte[]>([])
   const [klanten, setKlanten] = useState<Klant[]>([])
   const [gear, setGear] = useState<Gear[]>([])
@@ -146,27 +147,50 @@ function OffertesInner() {
   async function save() {
     setSaving(true)
     const nr = 'OFF-' + String(offertes.length + 1).padStart(4, '0')
-    const calc = calcDoc(form.gear_ids, form.accessory_ids, gear, accessories, form.start_datum, form.eind_datum, form.bus_dagprijs, form.generator_dagprijs, form.korting_pct, form.kortingPerRegel)
     const { data: { user } } = await supabase.auth.getUser()
+
+    // Get gear from klus if klus_id is set
+    let gearIds = form.gear_ids
+    let accIds = form.accessory_ids
+    let busDagprijs = 0
+    let klusNaam = ''
+    if (form.klus_id) {
+      const { data: klusData } = await supabase.from('klussen').select('*, bussen(*)').eq('id', form.klus_id).single()
+      const { data: kgData } = await supabase.from('klus_gear').select('gear_id').eq('klus_id', form.klus_id)
+      const { data: kaData } = await supabase.from('klus_accessories').select('accessory_id').eq('klus_id', form.klus_id)
+      gearIds = (kgData || []).map((x: any) => x.gear_id)
+      accIds = (kaData || []).map((x: any) => x.accessory_id)
+      // Bus prijzen optellen
+      if (klusData?.bus_ids?.length) {
+        const { data: bussen } = await supabase.from('bussen').select('dagprijs').in('id', klusData.bus_ids)
+        busDagprijs = (bussen || []).reduce((s: number, b: any) => s + b.dagprijs, 0)
+      }
+      klusNaam = klusData?.naam || ''
+    }
+
     const { data: res } = await supabase.from('offertes').insert({
       nummer: nr, klant_id: form.klant_id || null, klus_id: form.klus_id || null,
       start_datum: form.start_datum, eind_datum: form.eind_datum,
-      bus_dagprijs: form.bus_dagprijs, generator_dagprijs: form.generator_dagprijs,
-      korting_pct: form.korting_pct, geldig_tot: form.geldig_tot || null,
-      notities: form.notities, onderwerp: form.onderwerp, intro_tekst: form.intro_tekst,
-      footer_tekst: form.footer_tekst, algemene_voorwaarden_url: form.algemene_voorwaarden_url || null,
-      totaal_excl: calc.excl, status: 'concept',
-      gear_ids: form.gear_ids, accessory_ids: form.accessory_ids,
+      bus_dagprijs: busDagprijs, generator_dagprijs: 0,
+      korting_pct: 0, geldig_tot: form.geldig_tot || null,
+      notities: '', onderwerp: klusNaam || form.onderwerp || 'Offerte verhuur lichtapparatuur',
+      intro_tekst: 'Graag doen wij u een offerte toekomen voor de huur van onderstaande apparatuur.',
+      footer_tekst: 'Bedankt voor uw interesse.',
+      algemene_voorwaarden_url: avUrl || null,
+      totaal_excl: 0, status: 'concept',
+      gear_ids: gearIds, accessory_ids: accIds,
       aangemaakt_door: user?.id,
       bedrijfsnaam: profiel?.bedrijfsnaam, bedrijfsadres: profiel?.bedrijfsadres,
       bedrijfsbtw: profiel?.btw_nummer, logo_url: profiel?.logo_url,
-    }).select('*, klant:klanten(*)').single()
+      regels_versie: 2,
+    }).select().single()
+
     if (res) {
       await logAudit('aangemaakt', 'offertes', res.id, `Offerte ${nr} aangemaakt`)
       setModal(false)
-      setViewDoc(res)
+      // Navigate to detail page for editing
+      router.push(`/offertes/${res.id}`)
     }
-    await loadAll()
     setSaving(false)
   }
 
@@ -262,7 +286,7 @@ function OffertesInner() {
             </Thead>
             <Tbody>
               {offertes.map(o => (
-                <Tr key={o.id} onClick={() => setViewDoc(o)} className="cursor-pointer">
+                <Tr key={o.id} onClick={() => router.push(`/offertes/${o.id}`)} className="cursor-pointer">
                   <Td className="font-mono font-medium">{o.nummer}</Td>
                   <Td className="max-w-40 truncate">{o.onderwerp || '—'}</Td>
                   <Td>{(o.klant as any)?.naam || '—'}</Td>
@@ -299,129 +323,61 @@ function OffertesInner() {
       </div>
 
       {/* NIEUWE OFFERTE MODAL */}
-      <Modal open={modal} onClose={() => setModal(false)} title="Nieuwe offerte" width="max-w-5xl"
+      <Modal open={modal} onClose={() => setModal(false)} title="Nieuwe offerte" width="max-w-lg"
         footer={
           <>
             <button className="btn" onClick={() => setModal(false)}>Annuleren</button>
-            <div className="text-sm text-ink-500 mx-4">
-              {calc ? <span>Totaal: <strong>{eur(calc.excl)}</strong> excl. BTW</span> : ''}
-            </div>
-            <button className="btn btn-primary" onClick={save} disabled={saving}>{saving ? 'Opslaan…' : 'Opslaan & bekijken'}</button>
+            <button className="btn btn-primary" onClick={save} disabled={saving}>{saving ? 'Aanmaken…' : 'Aanmaken →'}</button>
           </>
         }>
-        <div className="grid grid-cols-5 gap-5">
-          {/* LEFT: form */}
-          <div className="col-span-3 space-y-4">
-            <FormField label="Onderwerp">
-              <input className="input" value={form.onderwerp} onChange={e => setForm(f => ({ ...f, onderwerp: e.target.value }))} />
-            </FormField>
-            <FormGrid>
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="label mb-0">Klant</label>
-                  <button className="text-[10px] text-brand-500 hover:underline" onClick={() => setNieuweKlantModal(true)}>+ nieuwe klant</button>
-                </div>
-                <select className="input" value={form.klant_id} onChange={e => setForm(f => ({ ...f, klant_id: e.target.value }))}>
-                  <option value="">— geen —</option>
-                  {klanten.map(k => <option key={k.id} value={k.id}>{k.naam}{k.bedrijf ? ` (${k.bedrijf})` : ''}</option>)}
-                </select>
-              </div>
-              <FormField label="Klus (optioneel)">
-                <select className="input" value={form.klus_id} onChange={e => setForm(f => ({ ...f, klus_id: e.target.value }))}>
-                  <option value="">— geen —</option>
-                  {klussen.map(k => <option key={k.id} value={k.id}>{k.naam}</option>)}
-                </select>
-              </FormField>
-              <FormField label="Van">
-                <input type="date" className="input" value={form.start_datum}
-                  onChange={e => setForm(f => ({ ...f, start_datum: e.target.value, eind_datum: f.eind_datum < e.target.value ? e.target.value : f.eind_datum }))} />
-              </FormField>
-              <FormField label="Tot">
-                <input type="date" className="input" min={form.start_datum} value={form.eind_datum}
-                  onChange={e => setForm(f => ({ ...f, eind_datum: e.target.value }))} />
-              </FormField>
-              <FormField label="Bus dagprijs (€)">
-                <input type="number" className="input" value={form.bus_dagprijs} onChange={e => setForm(f => ({ ...f, bus_dagprijs: +e.target.value }))} />
-              </FormField>
-              <FormField label="Generator dagprijs (€)">
-                <input type="number" className="input" value={form.generator_dagprijs} onChange={e => setForm(f => ({ ...f, generator_dagprijs: +e.target.value }))} />
-              </FormField>
-              <FormField label="Totaalkorting (%)">
-                <input type="number" className="input" value={form.korting_pct} onChange={e => setForm(f => ({ ...f, korting_pct: +e.target.value }))} />
-              </FormField>
-              <FormField label="Geldig tot">
-                <input type="date" className="input" value={form.geldig_tot} onChange={e => setForm(f => ({ ...f, geldig_tot: e.target.value }))} />
-              </FormField>
-            </FormGrid>
-            <FormField label="Intro tekst">
-              <textarea className="input h-14 resize-none text-xs" value={form.intro_tekst} onChange={e => setForm(f => ({ ...f, intro_tekst: e.target.value }))} />
-            </FormField>
-            <FormField label="Notities / bijzonderheden">
-              <textarea className="input h-14 resize-none text-xs" value={form.notities} onChange={e => setForm(f => ({ ...f, notities: e.target.value }))} />
-            </FormField>
-            <div className="flex items-center gap-2 text-xs text-ink-500 bg-ink-50 rounded-lg p-2">
-              <FileText size={12} />
-              {avUrl ? (
-                <><span>Algemene voorwaarden meesturen:</span>
-                <label className="flex items-center gap-1 cursor-pointer">
-                  <input type="checkbox" checked={!!form.algemene_voorwaarden_url}
-                    onChange={e => setForm(f => ({ ...f, algemene_voorwaarden_url: e.target.checked ? avUrl : '' }))} />
-                  <a href={avUrl} target="_blank" className="text-brand-500 hover:underline">Bekijk PDF</a>
-                </label></>
-              ) : <span className="text-ink-400">Upload eerst je algemene voorwaarden (zie boven)</span>}
-            </div>
+        <div className="space-y-4">
+          <div className="bg-blue-50 border border-blue-100 rounded-xl p-3 text-xs text-blue-700">
+            💡 Maak eerst een klus aan met de juiste gear en bussen. De offerte wordt dan automatisch gevuld.
           </div>
-
-          {/* RIGHT: gear selectie */}
-          <div className="col-span-2">
-            <div className="section-title">Gear selecteren</div>
-            <div className="border border-ink-200 rounded-xl overflow-hidden max-h-96 overflow-y-auto">
-              {['HMI', 'Tungsten', 'LED', 'Textile/Frame', 'Overig'].map(cat => {
-                const catGear = gear.filter(g => g.categorie === cat)
-                if (catGear.length === 0) return null
-                return (
-                  <div key={cat}>
-                    <div className="px-3 py-1.5 bg-ink-50 text-[10px] font-bold uppercase tracking-wider text-ink-400 sticky top-0">{cat}</div>
-                    {catGear.map(g => {
-                      const added = form.gear_ids.includes(g.id)
-                      const gAccs = accessories.filter(a => a.gear_id === g.id)
-                      return (
-                        <div key={g.id}>
-                          <div className={`flex items-center gap-2 px-3 py-2 border-b border-ink-100 cursor-pointer hover:bg-brand-50 ${added ? 'bg-brand-50' : ''}`}
-                            onClick={() => toggleGear(g.id)}>
-                            <input type="checkbox" readOnly checked={added} className="flex-shrink-0" />
-                            <span className="flex-1 text-xs text-ink-700 truncate">{g.naam}</span>
-                            <span className="text-xs text-ink-400 font-mono">{eur(g.dagprijs)}</span>
-                          </div>
-                          {added && gAccs.map(ac => (
-                            <div key={ac.id} className="flex items-center gap-2 px-3 py-1.5 bg-ink-50 border-b border-ink-100 cursor-pointer hover:bg-brand-50 pl-8"
-                              onClick={() => toggleAcc(ac.id)}>
-                              <input type="checkbox" readOnly checked={form.accessory_ids.includes(ac.id)} className="flex-shrink-0" />
-                              <span className="flex-1 text-[11px] text-ink-500 truncate">↳ {ac.naam}</span>
-                              <span className="text-[11px] text-ink-400 font-mono">{eur(ac.dagprijs)}</span>
-                            </div>
-                          ))}
-                        </div>
-                      )
-                    })}
-                  </div>
-                )
-              })}
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="label mb-0">Klant</label>
+              <button className="text-[10px] text-brand-500 hover:underline" onClick={() => setNieuweKlantModal(true)}>+ nieuwe klant</button>
             </div>
-            {calc && (
-              <div className="mt-3 bg-ink-50 rounded-xl p-3 text-xs space-y-1">
-                <div className="flex justify-between text-ink-500"><span>{dagsBetween(form.start_datum, form.eind_datum)} dagen · {form.gear_ids.length} items</span></div>
-                {calc.kortingBedrag > 0 && <div className="flex justify-between text-green-600"><span>Korting ({form.korting_pct}%)</span><span>-{eur(calc.kortingBedrag)}</span></div>}
-                <div className="flex justify-between font-semibold text-ink-700 pt-1 border-t border-ink-200 text-sm"><span>Totaal excl. BTW</span><span>{eur(calc.excl)}</span></div>
-                <div className="flex justify-between text-ink-400"><span>BTW 21%</span><span>{eur(calc.btw)}</span></div>
-                <div className="flex justify-between font-bold text-ink-800 text-sm"><span>Totaal incl. BTW</span><span>{eur(calc.totaal)}</span></div>
-              </div>
-            )}
+            <select className="input" value={form.klant_id} onChange={e => setForm(f => ({ ...f, klant_id: e.target.value }))}>
+              <option value="">— geen —</option>
+              {klanten.map(k => <option key={k.id} value={k.id}>{k.naam}{k.bedrijf ? ` (${k.bedrijf})` : ''}</option>)}
+            </select>
           </div>
+          <FormField label="Klus (gear + bussen worden automatisch overgenomen)">
+            <select className="input" value={form.klus_id} onChange={e => {
+              const klusId = e.target.value
+              const klus = klussen.find((k: any) => k.id === klusId)
+              setForm(f => ({
+                ...f, klus_id: klusId,
+                start_datum: klus?.start_datum || f.start_datum,
+                eind_datum: klus?.eind_datum || f.eind_datum,
+                onderwerp: klus?.naam || f.onderwerp,
+                klant_id: klus?.klant_id || f.klant_id,
+              }))
+            }}>
+              <option value="">— geen klus —</option>
+              {klussen.map((k: any) => <option key={k.id} value={k.id}>{k.naam}</option>)}
+            </select>
+          </FormField>
+          <FormGrid>
+            <FormField label="Startdatum">
+              <input type="date" className="input" value={form.start_datum}
+                onChange={e => setForm(f => ({ ...f, start_datum: e.target.value, eind_datum: f.eind_datum < e.target.value ? e.target.value : f.eind_datum }))} />
+            </FormField>
+            <FormField label="Einddatum">
+              <input type="date" className="input" min={form.start_datum} value={form.eind_datum}
+                onChange={e => setForm(f => ({ ...f, eind_datum: e.target.value }))} />
+            </FormField>
+            <FormField label="Geldig tot">
+              <input type="date" className="input" value={form.geldig_tot}
+                onChange={e => setForm(f => ({ ...f, geldig_tot: e.target.value }))} />
+            </FormField>
+          </FormGrid>
         </div>
       </Modal>
 
-      {/* VIEW DOCUMENT */}
+      {/* VIEW DOCUMENT - redirect to detail page now */}
       {viewDoc && (
         <Modal open={!!viewDoc} onClose={() => setViewDoc(null)} title={`Offerte ${viewDoc.nummer}`} width="max-w-3xl"
           footer={
