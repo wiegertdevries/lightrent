@@ -1,5 +1,5 @@
 'use client'
-import { useEffect, useState, useRef } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import AppShell from '@/components/layout/AppShell'
 import { supabase, getCurrentProfiel } from '@/lib/supabase'
@@ -8,24 +8,25 @@ import { getStaffelkorting, staffelLabel } from '@/lib/staffel'
 import { CatBadge, ConfirmModal, FormField, FormGrid } from '@/components/ui'
 import {
   ArrowLeft, Plus, X, Search, Check, Printer, Truck, Zap,
-  Puzzle, Trash2, Copy, Star, StarOff, GripVertical, Save,
-  ChevronDown, UserPlus, FileText, Receipt, Send
+  Puzzle, Trash2, Copy, GripVertical, Save, ChevronDown, UserPlus
 } from 'lucide-react'
 import type { Gear, Accessory, Bus, Generator, Klant, Profiel } from '@/lib/types'
 import clsx from 'clsx'
 
 const CATS = ['Alle', 'LED', 'HMI', 'Tungsten', 'Textile/Frame', 'Overig']
 
-type KlusStatus2 = 'in_optie' | 'bevestigd' | 'uitgevoerd' | 'gefactureerd'
-const STATUS_CFG: Record<KlusStatus2, { label: string; dot: string; cls: string }> = {
-  in_optie:     { label: 'In optie',     dot: 'bg-amber-400',  cls: 'bg-amber-50 text-amber-700 border-amber-200' },
-  bevestigd:    { label: 'Bevestigd',    dot: 'bg-green-500',  cls: 'bg-green-50 text-green-700 border-green-200' },
-  uitgevoerd:   { label: 'Uitgevoerd',   dot: 'bg-blue-500',   cls: 'bg-blue-50 text-blue-700 border-blue-200' },
-  gefactureerd: { label: 'Gefactureerd', dot: 'bg-ink-400',    cls: 'bg-ink-100 text-ink-600 border-ink-200' },
+type Status2 = 'in_optie' | 'bevestigd' | 'uitgevoerd' | 'gefactureerd'
+const STATUS_CFG: Record<Status2, { label: string; dot: string; cls: string }> = {
+  in_optie:     { label: 'In optie',     dot: 'bg-amber-400', cls: 'bg-amber-50 text-amber-700 border-amber-200' },
+  bevestigd:    { label: 'Bevestigd',    dot: 'bg-green-500', cls: 'bg-green-50 text-green-700 border-green-200' },
+  uitgevoerd:   { label: 'Uitgevoerd',   dot: 'bg-blue-500',  cls: 'bg-blue-50 text-blue-700 border-blue-200' },
+  gefactureerd: { label: 'Gefactureerd', dot: 'bg-ink-400',   cls: 'bg-ink-100 text-ink-600 border-ink-200' },
 }
 
 interface Regel {
   id: string
+  klus_id?: string
+  offerte_id?: string
   volgorde: number
   type: string
   omschrijving: string
@@ -36,7 +37,12 @@ interface Regel {
   is_korting_regel: boolean
   _dirty?: boolean
   _new?: boolean
+  _deleted?: boolean
 }
+
+// Stable ID for new rules
+let _newId = 0
+function newId() { return `new-${++_newId}` }
 
 export default function KlusDetailPage({ params }: { params: { id: string } }) {
   const { id } = params
@@ -67,11 +73,12 @@ export default function KlusDetailPage({ params }: { params: { id: string } }) {
   const [nieuweKlantForm, setNieuweKlantForm] = useState({ naam: '', bedrijf: '', email: '', telefoon: '' })
   const [form, setForm] = useState<any>({})
 
+  // ── LOAD ────────────────────────────────────────────────────
   useEffect(() => { loadAll() }, [id])
 
   async function loadAll() {
     const [{ data: k }, { data: g }, { data: a }, { data: b }, { data: gen },
-      { data: kl }, { data: gaf }, { data: kg }, { data: ka }, { data: r }] = await Promise.all([
+      { data: kl }, { data: gaf }, { data: kg }, { data: ka }] = await Promise.all([
       supabase.from('klussen').select('*, klant:klanten(*), gaffer:gaffers(*)').eq('id', id).single(),
       supabase.from('gear').select('*').order('categorie').order('naam'),
       supabase.from('accessories').select('*'),
@@ -81,13 +88,17 @@ export default function KlusDetailPage({ params }: { params: { id: string } }) {
       supabase.from('gaffers').select('*').order('naam'),
       supabase.from('klus_gear').select('gear_id').eq('klus_id', id),
       supabase.from('klus_accessories').select('accessory_id').eq('klus_id', id),
-      supabase.from('offerte_regels').select('*').eq('offerte_id', id).order('volgorde'),
     ])
-    setKlus(k); setGear(g || []); setAccessories(a || []); setBussen(b || [])
-    setGenerators(gen || []); setKlanten(kl || []); setGaffers(gaf || [])
-    setKlusGearIds((kg || []).map((x: any) => x.gear_id))
-    setKlusAccIds((ka || []).map((x: any) => x.accessory_id))
+
+    setKlus(k); setGear(g || []); setAccessories(a || [])
+    setBussen(b || []); setGenerators(gen || [])
+    setKlanten(kl || []); setGaffers(gaf || [])
+    const gearIds = (kg || []).map((x: any) => x.gear_id)
+    const accIds = (ka || []).map((x: any) => x.accessory_id)
+    setKlusGearIds(gearIds)
+    setKlusAccIds(accIds)
     const p = await getCurrentProfiel(); setProfiel(p)
+
     if (k) {
       setForm({
         naam: k.naam || '', klus_nummer: k.klus_nummer || '',
@@ -103,80 +114,101 @@ export default function KlusDetailPage({ params }: { params: { id: string } }) {
         offerte_notities: k.offerte_notities || '',
         offerte_status: k.offerte_status || 'concept',
       })
-    }
-    // Load or generate offerte regels
-    if (r && r.length > 0) {
-      setRegels(r)
-    } else if (k) {
-      await generateRegels(k, kg || [], ka || [], g || [], a || [], b || [])
+
+      // Load regels from DB or generate fresh
+      const { data: dbRegels } = await supabase
+        .from('offerte_regels')
+        .select('*')
+        .or(`klus_id.eq.${id},offerte_id.eq.${id}`)
+        .order('volgorde')
+
+      if (dbRegels && dbRegels.length > 0) {
+        setRegels(dbRegels)
+      } else {
+        // Auto-generate on first visit
+        await buildAndSaveRegels(k, gearIds, accIds, g || [], a || [], b || [], gen || [], gaf || [])
+      }
     }
     setLoading(false)
   }
 
-  async function generateRegels(k: any, kg: any[], ka: any[], gearList: Gear[], accList: Accessory[], bussenList: Bus[]) {
-    const dagen = dagsBetween(k.start_datum, k.eind_datum)
-    const gearIds = kg.map((x: any) => x.gear_id)
-    const accIds = ka.map((x: any) => x.accessory_id)
-    const newRegels: any[] = []
-    let vol = 0
+  // ── BUILD REGELS ─────────────────────────────────────────────
+  async function buildAndSaveRegels(
+    klusData: any, gearIds: string[], accIds: string[],
+    gearList: Gear[], accList: Accessory[], bussenList: Bus[],
+    genList: Generator[], gafferList: any[]
+  ) {
+    const dagen = dagsBetween(klusData.start_datum, klusData.eind_datum)
+    const rows: any[] = []
+    let v = 0
 
-    // Bussen eerst
-    const klusBussen = bussenList.filter(b => (k.bus_ids || []).includes(b.id))
-    // 60KVA before Honda
-    const sortedBussen = [...klusBussen].sort((a, b) => {
-      if (a.naam.toLowerCase().includes('atego')) return -1
-      if (b.naam.toLowerCase().includes('atego')) return 1
-      if (a.naam.toLowerCase().includes('sprinter')) return -1
-      return 0
-    })
-    for (const bus of sortedBussen) {
-      newRegels.push({ offerte_id: id, volgorde: vol++, type: 'transport', omschrijving: bus.naam, dagprijs: bus.dagprijs, dagen, subtotaal: bus.dagprijs * dagen, korting_pct: 0, korting_bedrag: 0, is_korting_regel: false })
+    // 1. Gaffer dagfee (als gaffer_id is ingesteld en dagprijs > 0)
+    if (klusData.gaffer_id) {
+      const gaffer = gafferList.find((g: any) => g.id === klusData.gaffer_id)
+      if (gaffer && gaffer.dagprijs > 0) {
+        rows.push({ klus_id: id, offerte_id: id, volgorde: v++, type: 'gaffer', omschrijving: `Gaffer: ${gaffer.naam}`, dagprijs: gaffer.dagprijs, dagen, subtotaal: gaffer.dagprijs * dagen, korting_pct: 0, korting_bedrag: 0, is_korting_regel: false })
+      }
     }
 
-    // Gear
+    // 2. Bussen (Atego eerst, dan Sprinter)
+    const klusBussen = bussenList.filter(b => (klusData.bus_ids || []).includes(b.id))
+      .sort((a, b) => a.naam.toLowerCase().includes('atego') ? -1 : b.naam.toLowerCase().includes('atego') ? 1 : 0)
+    for (const bus of klusBussen) {
+      rows.push({ klus_id: id, offerte_id: id, volgorde: v++, type: 'transport', omschrijving: bus.naam, dagprijs: bus.dagprijs, dagen, subtotaal: bus.dagprijs * dagen, korting_pct: 0, korting_bedrag: 0, is_korting_regel: false })
+    }
+
+    // 3. Generators (60KVA eerst)
+    const klusGens = genList.filter(g => (klusData.generator_info || []).some((gi: any) => gi.generator_id === g.id))
+      .sort((a, b) => a.naam.toLowerCase().includes('60kva') ? -1 : 1)
+    for (const gen of klusGens) {
+      rows.push({ klus_id: id, offerte_id: id, volgorde: v++, type: 'generator', omschrijving: gen.naam, dagprijs: 0, dagen, subtotaal: 0, korting_pct: 0, korting_bedrag: 0, is_korting_regel: false })
+    }
+
+    // 4. Gear
     for (const gid of gearIds) {
       const g = gearList.find(x => x.id === gid)
-      if (g) newRegels.push({ offerte_id: id, volgorde: vol++, type: 'gear', omschrijving: g.naam, gear_id: gid, dagprijs: g.dagprijs, dagen, subtotaal: g.dagprijs * dagen, korting_pct: 0, korting_bedrag: 0, is_korting_regel: false })
+      if (g) rows.push({ klus_id: id, offerte_id: id, volgorde: v++, type: 'gear', omschrijving: g.naam, gear_id: gid, dagprijs: g.dagprijs, dagen, subtotaal: g.dagprijs * dagen, korting_pct: 0, korting_bedrag: 0, is_korting_regel: false })
     }
-    // Accessories
+
+    // 5. Accessories
     for (const aid of accIds) {
       const a = accList.find(x => x.id === aid)
       if (a) {
         const parent = gearList.find(x => x.id === a.gear_id)
-        newRegels.push({ offerte_id: id, volgorde: vol++, type: 'accessory', omschrijving: `↳ ${a.naam}${parent ? ' (' + parent.naam.split(' ').slice(0,3).join(' ') + ')' : ''}`, dagprijs: a.dagprijs, dagen, subtotaal: a.dagprijs * dagen, korting_pct: 0, korting_bedrag: 0, is_korting_regel: false })
+        rows.push({ klus_id: id, offerte_id: id, volgorde: v++, type: 'accessory', omschrijving: `↳ ${a.naam}${parent ? ' (' + parent.naam.split(' ').slice(0,3).join(' ') + ')' : ''}`, dagprijs: a.dagprijs, dagen, subtotaal: a.dagprijs * dagen, korting_pct: 0, korting_bedrag: 0, is_korting_regel: false })
       }
     }
 
-    // Staffelkorting
+    // 6. Staffelkorting
     const staffelPct = getStaffelkorting(dagen)
-    if (staffelPct > 0 && newRegels.length > 0) {
-      const sub = newRegels.reduce((s: number, r: any) => s + r.subtotaal, 0)
-      const kortingBedrag = sub * (staffelPct / 100)
-      newRegels.push({ offerte_id: id, volgorde: vol++, type: 'korting', omschrijving: staffelLabel(staffelPct), dagprijs: 0, dagen: 1, subtotaal: -kortingBedrag, korting_pct: staffelPct, korting_bedrag: kortingBedrag, is_korting_regel: true })
+    if (staffelPct > 0 && rows.length > 0) {
+      const sub = rows.reduce((s, r) => s + r.subtotaal, 0)
+      rows.push({ klus_id: id, offerte_id: id, volgorde: v++, type: 'korting', omschrijving: staffelLabel(staffelPct), dagprijs: 0, dagen: 1, subtotaal: -(sub * staffelPct / 100), korting_pct: staffelPct, korting_bedrag: sub * staffelPct / 100, is_korting_regel: true })
     }
 
-    if (newRegels.length > 0) {
-      const { data: saved } = await supabase.from('offerte_regels').insert(newRegels).select()
+    if (rows.length > 0) {
+      // Delete old, insert new
+      await supabase.from('offerte_regels').delete().or(`klus_id.eq.${id},offerte_id.eq.${id}`)
+      const { data: saved } = await supabase.from('offerte_regels').insert(rows).select()
       setRegels(saved || [])
     }
   }
 
   async function refreshRegels() {
-    // Delete existing and regenerate
-    await supabase.from('offerte_regels').delete().eq('offerte_id', id)
-    const { data: kg } = await supabase.from('klus_gear').select('gear_id').eq('klus_id', id)
-    const { data: ka } = await supabase.from('klus_accessories').select('accessory_id').eq('klus_id', id)
-    await generateRegels(klus, kg || [], ka || [], gear, accessories, bussen)
+    await buildAndSaveRegels(
+      { ...klus, bus_ids: form.bus_ids, generator_info: form.generator_info, gaffer_id: form.gaffer_id },
+      klusGearIds, klusAccIds, gear, accessories, bussen, generators, gaffers
+    )
   }
 
-  // ── GEAR ──────────────────────────────────────────────────────
+  // ── GEAR MANAGEMENT ──────────────────────────────────────────
   async function addGear(gearId: string) {
     if (klusGearIds.includes(gearId)) return
     await supabase.from('klus_gear').insert({ klus_id: id, gear_id: gearId })
     const g = gear.find(x => x.id === gearId)
     if (g) {
       const dagen = dagsBetween(form.start_datum, form.eind_datum)
-      const nieuw = { offerte_id: id, volgorde: regels.filter(r => !r.is_korting_regel).length, type: 'gear', omschrijving: g.naam, gear_id: gearId, dagprijs: g.dagprijs, dagen, subtotaal: g.dagprijs * dagen, korting_pct: 0, korting_bedrag: 0, is_korting_regel: false }
+      const nieuw = { klus_id: id, offerte_id: id, volgorde: regels.filter(r => !r.is_korting_regel).length, type: 'gear', omschrijving: g.naam, gear_id: gearId, dagprijs: g.dagprijs, dagen, subtotaal: g.dagprijs * dagen, korting_pct: 0, korting_bedrag: 0, is_korting_regel: false }
       const { data } = await supabase.from('offerte_regels').insert([nieuw]).select()
       if (data) setRegels(prev => [...prev.filter(r => !r.is_korting_regel), ...data, ...prev.filter(r => r.is_korting_regel)])
     }
@@ -185,6 +217,7 @@ export default function KlusDetailPage({ params }: { params: { id: string } }) {
 
   async function removeGear(gearId: string) {
     await supabase.from('klus_gear').delete().eq('klus_id', id).eq('gear_id', gearId)
+    // Remove accessories
     const gearAccIds = accessories.filter(a => a.gear_id === gearId).map(a => a.id)
     const toRemove = klusAccIds.filter(aid => gearAccIds.includes(aid))
     if (toRemove.length > 0) {
@@ -192,9 +225,11 @@ export default function KlusDetailPage({ params }: { params: { id: string } }) {
       setKlusAccIds(prev => prev.filter(aid => !toRemove.includes(aid)))
     }
     setKlusGearIds(prev => prev.filter(x => x !== gearId))
-    // Remove regel
-    const regelIds = regels.filter(r => (r as any).gear_id === gearId).map(r => r.id)
-    if (regelIds.length) await supabase.from('offerte_regels').delete().in('id', regelIds)
+    // Remove from regels
+    const toDelete = regels.filter(r => (r as any).gear_id === gearId)
+    for (const r of toDelete) {
+      if (!r.id.startsWith('new-')) await supabase.from('offerte_regels').delete().eq('id', r.id)
+    }
     setRegels(prev => prev.filter(r => (r as any).gear_id !== gearId))
   }
 
@@ -205,7 +240,7 @@ export default function KlusDetailPage({ params }: { params: { id: string } }) {
     if (a) {
       const parent = gear.find(x => x.id === a.gear_id)
       const dagen = dagsBetween(form.start_datum, form.eind_datum)
-      const nieuw = { offerte_id: id, volgorde: regels.length, type: 'accessory', omschrijving: `↳ ${a.naam}${parent ? ' (' + parent.naam.split(' ').slice(0,3).join(' ') + ')' : ''}`, dagprijs: a.dagprijs, dagen, subtotaal: a.dagprijs * dagen, korting_pct: 0, korting_bedrag: 0, is_korting_regel: false }
+      const nieuw = { klus_id: id, offerte_id: id, volgorde: regels.length, type: 'accessory', omschrijving: `↳ ${a.naam}${parent ? ' (' + parent.naam.split(' ').slice(0,3).join(' ') + ')' : ''}`, dagprijs: a.dagprijs, dagen, subtotaal: a.dagprijs * dagen, korting_pct: 0, korting_bedrag: 0, is_korting_regel: false }
       const { data } = await supabase.from('offerte_regels').insert([nieuw]).select()
       if (data) setRegels(prev => [...prev, ...data])
     }
@@ -217,16 +252,18 @@ export default function KlusDetailPage({ params }: { params: { id: string } }) {
     setKlusAccIds(prev => prev.filter(x => x !== accId))
   }
 
-  // ── OFFERTE REGELS ────────────────────────────────────────────
+  // ── REGEL MANAGEMENT ─────────────────────────────────────────
   function updateRegel(regelId: string, field: string, value: any) {
     setRegels(prev => prev.map(r => {
       if (r.id !== regelId) return r
       const updated = { ...r, [field]: value, _dirty: true }
-      if (field === 'dagprijs' || field === 'dagen') updated.subtotaal = Number(updated.dagprijs) * Number(updated.dagen)
+      if (field === 'dagprijs' || field === 'dagen') {
+        updated.subtotaal = Number(updated.dagprijs) * Number(updated.dagen)
+      }
       if (field === 'korting_pct' && r.is_korting_regel) {
         const sub = prev.filter(x => !x.is_korting_regel).reduce((s, x) => s + x.subtotaal, 0)
-        updated.subtotaal = -(sub * (Number(value) / 100))
-        updated.omschrijving = staffelLabel(Number(value)) || updated.omschrijving
+        updated.subtotaal = -(sub * Number(value) / 100)
+        updated.omschrijving = staffelLabel(Number(value)) || r.omschrijving
       }
       return updated
     }))
@@ -234,83 +271,45 @@ export default function KlusDetailPage({ params }: { params: { id: string } }) {
 
   async function saveRegels() {
     setSavingRegels(true)
-    const dirty = regels.filter(r => r._dirty || r._new)
-    for (const r of dirty) {
-      const { _dirty, _new, ...data } = r as any
-      if (_new) await supabase.from('offerte_regels').insert({ ...data, offerte_id: id })
-      else await supabase.from('offerte_regels').update(data).eq('id', r.id)
+    const toSave = regels.filter(r => r._dirty || r._new)
+    for (const r of toSave) {
+      const { id: rid, _dirty, _new, ...data } = r as any
+      const saveData = { ...data, klus_id: id, offerte_id: id }
+      if (_new) {
+        // Insert new regel and update local id
+        const { data: inserted } = await supabase.from('offerte_regels').insert([saveData]).select().single()
+        if (inserted) {
+          setRegels(prev => prev.map(x => x.id === rid ? { ...inserted } : x))
+        }
+      } else {
+        await supabase.from('offerte_regels').update(saveData).eq('id', rid)
+      }
     }
-    await loadAll()
+    // Clean dirty flags
+    setRegels(prev => prev.map(r => ({ ...r, _dirty: false, _new: false })))
     setSavingRegels(false)
   }
 
   async function deleteRegel(regelId: string) {
-    if (regelId.startsWith('new-')) { setRegels(prev => prev.filter(r => r.id !== regelId)); return }
-    await supabase.from('offerte_regels').delete().eq('id', regelId)
+    if (!regelId.startsWith('new-')) {
+      await supabase.from('offerte_regels').delete().eq('id', regelId)
+    }
     setRegels(prev => prev.filter(r => r.id !== regelId))
   }
 
   function addRegel(isKorting = false) {
     const dagen = dagsBetween(form.start_datum, form.eind_datum)
+    const subTotaal = isKorting ? regels.filter(r => !r.is_korting_regel).reduce((s, r) => s + r.subtotaal, 0) : 0
     setRegels(prev => [...prev, {
-      id: `new-${Date.now()}`, volgorde: prev.length, type: isKorting ? 'korting' : 'gear',
-      omschrijving: isKorting ? 'Korting' : 'Omschrijving', dagprijs: 0, dagen: isKorting ? 1 : dagen,
-      subtotaal: 0, korting_pct: 0, is_korting_regel: isKorting, _new: true
+      id: newId(), klus_id: id, offerte_id: id,
+      volgorde: prev.length, type: isKorting ? 'korting' : 'gear',
+      omschrijving: isKorting ? 'Korting' : 'Omschrijving',
+      dagprijs: 0, dagen: isKorting ? 1 : dagen, subtotaal: 0,
+      korting_pct: 0, is_korting_regel: isKorting, _new: true
     }])
   }
 
-  // ── DETAILS ───────────────────────────────────────────────────
-  async function saveDetails() {
-    setSaving(true)
-    let gaffer_id = form.gaffer_id
-    if (!gaffer_id && form.verantwoordelijke) {
-      const matchGaffer = gaffers.find(g => g.naam.toLowerCase().startsWith(form.verantwoordelijke.toLowerCase()))
-      if (matchGaffer) gaffer_id = matchGaffer.id
-    }
-    const syncStatus = ['uitgevoerd', 'gefactureerd'].includes(form.status_v2) ? 'afgerond' : form.status_v2 === 'bevestigd' ? 'actief' : 'gepland'
-    await supabase.from('klussen').update({
-      naam: form.naam, klus_nummer: form.klus_nummer || null,
-      klant_id: form.klant_id || null, gaffer_id: gaffer_id || null,
-      verantwoordelijke: form.verantwoordelijke || null,
-      start_datum: form.start_datum || null, eind_datum: form.eind_datum || null,
-      bus_ids: form.bus_ids, generator_info: form.generator_info,
-      locatie: form.locatie, referentie: form.referentie,
-      notities: form.notities, interne_notities: form.interne_notities,
-      status_v2: form.status_v2, status: syncStatus,
-      offerte_geldig_tot: form.offerte_geldig_tot || null,
-      offerte_intro: form.offerte_intro,
-      offerte_notities: form.offerte_notities,
-      offerte_status: form.offerte_status,
-    }).eq('id', id)
-    await loadAll()
-    setEditingDetails(false)
-    setSaving(false)
-  }
-
-  async function maakNieuweKlant() {
-    if (!nieuweKlantForm.naam) return
-    const { data } = await supabase.from('klanten').insert(nieuweKlantForm).select().single()
-    if (data) { await loadAll(); setForm((f: any) => ({ ...f, klant_id: data.id })) }
-    setNieuweKlantModal(false)
-    setNieuweKlantForm({ naam: '', bedrijf: '', email: '', telefoon: '' })
-  }
-
-  async function dupliceer() {
-    if (!klus) return
-    const { data: nieuw } = await supabase.from('klussen').insert({
-      naam: `${klus.naam} (kopie)`, klant_id: klus.klant_id, verantwoordelijke: klus.verantwoordelijke,
-      gaffer_id: klus.gaffer_id, start_datum: klus.start_datum, eind_datum: klus.eind_datum,
-      bus_ids: klus.bus_ids, generator_info: klus.generator_info,
-      notities: klus.notities, status: 'gepland', status_v2: 'in_optie'
-    }).select().single()
-    if (nieuw) {
-      if (klusGearIds.length > 0) await supabase.from('klus_gear').insert(klusGearIds.map(gid => ({ klus_id: nieuw.id, gear_id: gid })))
-      if (klusAccIds.length > 0) await supabase.from('klus_accessories').insert(klusAccIds.map(aid => ({ klus_id: nieuw.id, accessory_id: aid })))
-      router.push(`/klussen/${nieuw.id}`)
-    }
-  }
-
-  // ── DRAG REORDER ──────────────────────────────────────────────
+  // ── DRAG REORDER ─────────────────────────────────────────────
   function handleDragStart(e: React.DragEvent, regelId: string) { e.dataTransfer.setData('text/plain', regelId) }
   function handleDrop(e: React.DragEvent, targetId: string) {
     e.preventDefault()
@@ -327,6 +326,61 @@ export default function KlusDetailPage({ params }: { params: { id: string } }) {
     setDragOver(null)
   }
 
+  // ── DETAILS SAVE ─────────────────────────────────────────────
+  async function saveDetails() {
+    setSaving(true)
+    let gaffer_id = form.gaffer_id
+    if (!gaffer_id && form.verantwoordelijke) {
+      const match = gaffers.find(g => g.naam.toLowerCase().startsWith(form.verantwoordelijke.toLowerCase()))
+      if (match) gaffer_id = match.id
+    }
+    const syncStatus = ['uitgevoerd','gefactureerd'].includes(form.status_v2) ? 'afgerond' : form.status_v2 === 'bevestigd' ? 'actief' : 'gepland'
+    await supabase.from('klussen').update({
+      naam: form.naam, klus_nummer: form.klus_nummer || null,
+      klant_id: form.klant_id || null, gaffer_id: gaffer_id || null,
+      verantwoordelijke: form.verantwoordelijke || null,
+      start_datum: form.start_datum || null, eind_datum: form.eind_datum || null,
+      bus_ids: form.bus_ids, generator_info: form.generator_info,
+      locatie: form.locatie, notities: form.notities, interne_notities: form.interne_notities,
+      status_v2: form.status_v2, status: syncStatus,
+      offerte_geldig_tot: form.offerte_geldig_tot || null,
+      offerte_intro: form.offerte_intro, offerte_notities: form.offerte_notities,
+      offerte_status: form.offerte_status,
+    }).eq('id', id)
+    // Rebuild regels after details change (bus/gaffer/gear might have changed)
+    await buildAndSaveRegels(
+      { ...klus, ...form, gaffer_id },
+      klusGearIds, klusAccIds, gear, accessories, bussen, generators, gaffers
+    )
+    await loadAll()
+    setEditingDetails(false)
+    setSaving(false)
+  }
+
+  async function maakNieuweKlant() {
+    if (!nieuweKlantForm.naam) return
+    const { data } = await supabase.from('klanten').insert(nieuweKlantForm).select().single()
+    if (data) { await loadAll(); setForm((f: any) => ({ ...f, klant_id: data.id })) }
+    setNieuweKlantModal(false)
+    setNieuweKlantForm({ naam: '', bedrijf: '', email: '', telefoon: '' })
+  }
+
+  async function dupliceer() {
+    if (!klus) return
+    const { data: nieuw } = await supabase.from('klussen').insert({
+      naam: `${klus.naam} (kopie)`, klant_id: klus.klant_id,
+      verantwoordelijke: klus.verantwoordelijke, gaffer_id: klus.gaffer_id,
+      start_datum: klus.start_datum, eind_datum: klus.eind_datum,
+      bus_ids: klus.bus_ids, generator_info: klus.generator_info,
+      notities: klus.notities, status: 'gepland', status_v2: 'in_optie'
+    }).select().single()
+    if (nieuw) {
+      if (klusGearIds.length > 0) await supabase.from('klus_gear').insert(klusGearIds.map(gid => ({ klus_id: nieuw.id, gear_id: gid })))
+      if (klusAccIds.length > 0) await supabase.from('klus_accessories').insert(klusAccIds.map(aid => ({ klus_id: nieuw.id, accessory_id: aid })))
+      router.push(`/klussen/${nieuw.id}`)
+    }
+  }
+
   function toggleBus(busId: string) {
     setForm((f: any) => ({ ...f, bus_ids: f.bus_ids.includes(busId) ? f.bus_ids.filter((x: string) => x !== busId) : [...f.bus_ids, busId] }))
   }
@@ -337,12 +391,12 @@ export default function KlusDetailPage({ params }: { params: { id: string } }) {
     })
   }
 
-  // ── COMPUTED ──────────────────────────────────────────────────
+  // ── COMPUTED ─────────────────────────────────────────────────
   const busList = bussen.filter(b => (form.bus_ids || []).includes(b.id))
-  const genList = generators.filter(g => (form.generator_info || []).some((gi: any) => gi.generator_id === g.id))
-  const regelSubtotaal = regels.filter(r => !r.is_korting_regel).reduce((s, r) => s + r.subtotaal, 0)
-  const kortingTotaal = regels.filter(r => r.is_korting_regel).reduce((s, r) => s + Math.abs(r.subtotaal), 0)
-  const excl = regelSubtotaal - kortingTotaal
+  const genListSelected = generators.filter(g => (form.generator_info || []).some((gi: any) => gi.generator_id === g.id))
+  const regelSub = regels.filter(r => !r.is_korting_regel).reduce((s, r) => s + r.subtotaal, 0)
+  const kortingSub = regels.filter(r => r.is_korting_regel).reduce((s, r) => s + Math.abs(r.subtotaal), 0)
+  const excl = regelSub - kortingSub
   const btw = excl * 0.21
   const incl = excl + btw
   const hasDirty = regels.some(r => r._dirty || r._new)
@@ -356,25 +410,24 @@ export default function KlusDetailPage({ params }: { params: { id: string } }) {
   if (loading || !klus) return <AppShell><div className="p-8 text-ink-400 text-sm">Laden…</div></AppShell>
 
   const status = klus.status_v2 || 'in_optie'
-  const statusCfg = STATUS_CFG[status as KlusStatus2] || STATUS_CFG.in_optie
+  const statusCfg = STATUS_CFG[status as Status2] || STATUS_CFG.in_optie
   const klant = klus.klant
   const bedrijfsnaam = profiel?.bedrijfsnaam || 'LightRent Pro'
 
-  // ── PRINT VIEW ────────────────────────────────────────────────
+  // ── PRINT ────────────────────────────────────────────────────
   if (activeTab === 'print') {
     return (
       <div className="min-h-screen bg-white">
-        <style>{`@media print { .no-print { display: none !important; } }`}</style>
-        <div className="no-print bg-white border-b border-ink-100 px-8 py-4 flex items-center gap-3 sticky top-0">
+        <style>{`@media print { .no-print { display: none !important; } * { -webkit-print-color-adjust: exact; } }`}</style>
+        <div className="no-print bg-white border-b border-ink-100 px-8 py-4 flex items-center gap-3 sticky top-0 z-10">
           <button className="btn" onClick={() => setActiveTab('offerte')}><ArrowLeft size={14} /> Terug</button>
-          <button className="btn btn-primary" onClick={() => window.print()}>🖨️ Afdrukken / PDF opslaan</button>
-          <span className="text-sm text-ink-400 ml-2">Tip: kies "Opslaan als PDF" in het afdrukvenster</span>
+          <button className="btn btn-primary" onClick={() => window.print()}>🖨️ Afdrukken / PDF</button>
+          <span className="text-sm text-ink-400">Kies "Opslaan als PDF" in het afdrukvenster</span>
         </div>
-        <div className="p-10 max-w-[780px] mx-auto">
-          {/* Briefhoofd */}
+        <div className="p-12 max-w-[780px] mx-auto">
           <div className="flex justify-between items-start mb-8 pb-6 border-b-2 border-ink-800">
             <div>
-              <div className="text-2xl font-bold text-ink-800">{bedrijfsnaam}</div>
+              <div className="text-2xl font-bold">{bedrijfsnaam}</div>
               {profiel?.bedrijfsadres && <div className="text-sm text-ink-500 mt-1">{profiel.bedrijfsadres}</div>}
               {profiel?.bedrijfspostcode && <div className="text-sm text-ink-500">{profiel.bedrijfspostcode} {profiel.bedrijfsplaats}</div>}
               {profiel?.btw_nummer && <div className="text-xs text-ink-400 mt-1">BTW: {profiel.btw_nummer}</div>}
@@ -382,50 +435,47 @@ export default function KlusDetailPage({ params }: { params: { id: string } }) {
             </div>
             <div className="text-right">
               <div className="text-3xl font-bold" style={{ color: '#F97316' }}>OFFERTE</div>
-              <div className="font-semibold text-ink-700 mt-1">{klus.klus_nummer || klus.id.slice(0,8).toUpperCase()}</div>
+              <div className="font-semibold text-ink-700 mt-1">{form.klus_nummer || klus.id.slice(0,8).toUpperCase()}</div>
               <div className="text-sm text-ink-400">Datum: {fmt(new Date().toISOString())}</div>
               {form.offerte_geldig_tot && <div className="text-sm text-ink-400">Geldig tot: {fmt(form.offerte_geldig_tot)}</div>}
             </div>
           </div>
-          {/* Klantgegevens */}
           {klant && (
             <div className="mb-6">
               <div className="text-xs uppercase tracking-wider text-ink-400 mb-1">Aan</div>
               <div className="font-semibold">{klant.naam}</div>
-              {klant.bedrijf && <div className="text-ink-600">{klant.bedrijf}</div>}
+              {klant.bedrijf && <div>{klant.bedrijf}</div>}
               {klant.adres && <div className="text-sm text-ink-500">{klant.adres}</div>}
               {klant.postcode && <div className="text-sm text-ink-500">{klant.postcode} {klant.stad}</div>}
               {klant.btw_nummer && <div className="text-xs text-ink-400">BTW: {klant.btw_nummer}</div>}
             </div>
           )}
-          {/* Onderwerp */}
-          <div className="font-semibold text-ink-700 mb-2">{klus.naam}</div>
+          <div className="font-semibold text-ink-700 mb-1">{klus.naam}</div>
           {form.offerte_intro && <div className="text-sm text-ink-500 italic mb-4">{form.offerte_intro}</div>}
           <div className="text-xs text-ink-400 mb-4">
             Verhuurperiode: {fmt(form.start_datum)} – {fmt(form.eind_datum)} ({dagsBetween(form.start_datum, form.eind_datum)} dag{dagsBetween(form.start_datum, form.eind_datum) !== 1 ? 'en' : ''})
           </div>
-          {/* Regels */}
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, marginBottom: 24 }}>
             <thead>
               <tr style={{ borderBottom: '2px solid #26231D' }}>
-                <th style={{ textAlign: 'left', padding: '8px 4px', fontSize: 11, color: '#5C574D', fontWeight: 600 }}>Omschrijving</th>
-                <th style={{ textAlign: 'right', padding: '8px 4px', fontSize: 11, color: '#5C574D', fontWeight: 600 }}>Dagprijs</th>
-                <th style={{ textAlign: 'right', padding: '8px 4px', fontSize: 11, color: '#5C574D', fontWeight: 600 }}>Dagen</th>
-                <th style={{ textAlign: 'right', padding: '8px 4px', fontSize: 11, color: '#5C574D', fontWeight: 600 }}>Subtotaal</th>
+                {['Omschrijving','Dagprijs','Dagen','Subtotaal'].map((h, i) => (
+                  <th key={h} style={{ textAlign: i === 0 ? 'left' : 'right', padding: '8px 4px', fontSize: 11, color: '#5C574D', fontWeight: 600 }}>{h}</th>
+                ))}
               </tr>
             </thead>
             <tbody>
               {regels.map(r => (
                 <tr key={r.id} style={{ borderBottom: '1px solid #EFEDE8' }}>
-                  <td style={{ padding: '7px 4px', fontStyle: r.omschrijving.startsWith('↳') ? 'italic' : 'normal', color: r.is_korting_regel ? '#0F6E56' : '#26231D', paddingLeft: r.omschrijving.startsWith('↳') ? 16 : 4 }}>{r.omschrijving}</td>
-                  <td style={{ textAlign: 'right', padding: '7px 4px', fontFamily: 'monospace', color: '#5C574D' }}>{r.is_korting_regel ? (r.korting_pct > 0 ? `${r.korting_pct}%` : '') : eur(r.dagprijs)}</td>
-                  <td style={{ textAlign: 'right', padding: '7px 4px', color: '#5C574D' }}>{r.is_korting_regel ? '' : r.dagen}</td>
+                  <td style={{ padding: '7px 4px', paddingLeft: r.omschrijving.startsWith('↳') ? 16 : 4, fontStyle: r.omschrijving.startsWith('↳') ? 'italic' : 'normal', color: r.is_korting_regel ? '#0F6E56' : '#26231D' }}>{r.omschrijving}</td>
+                  <td style={{ textAlign: 'right', padding: '7px 4px', fontFamily: 'monospace', color: '#5C574D' }}>{!r.is_korting_regel ? eur(r.dagprijs) : r.korting_pct > 0 ? `${r.korting_pct}%` : ''}</td>
+                  <td style={{ textAlign: 'right', padding: '7px 4px', color: '#5C574D' }}>{!r.is_korting_regel ? r.dagen : ''}</td>
                   <td style={{ textAlign: 'right', padding: '7px 4px', fontFamily: 'monospace', color: r.is_korting_regel ? '#0F6E56' : '#26231D' }}>{r.is_korting_regel ? `−${eur(Math.abs(r.subtotaal))}` : eur(r.subtotaal)}</td>
                 </tr>
               ))}
             </tbody>
             <tfoot>
-              {kortingTotaal > 0 && <tr><td colSpan={3} style={{ textAlign: 'right', padding: '8px 4px', color: '#5C574D', borderTop: '1px solid #DDD9D0' }}>Subtotaal</td><td style={{ textAlign: 'right', padding: '8px 4px', fontFamily: 'monospace', borderTop: '1px solid #DDD9D0' }}>{eur(regelSubtotaal)}</td></tr>}
+              {kortingSub > 0 && <tr><td colSpan={3} style={{ textAlign: 'right', padding: '8px 4px', color: '#5C574D', borderTop: '1px solid #DDD9D0' }}>Subtotaal</td><td style={{ textAlign: 'right', padding: '8px 4px', fontFamily: 'monospace', borderTop: '1px solid #DDD9D0' }}>{eur(regelSub)}</td></tr>}
+              <tr><td colSpan={3} style={{ textAlign: 'right', padding: '8px 4px', color: '#5C574D' }}>Excl. BTW</td><td style={{ textAlign: 'right', padding: '8px 4px', fontFamily: 'monospace' }}>{eur(excl)}</td></tr>
               <tr><td colSpan={3} style={{ textAlign: 'right', padding: '6px 4px', color: '#9B9589', fontSize: 12 }}>BTW 21%</td><td style={{ textAlign: 'right', padding: '6px 4px', fontFamily: 'monospace', color: '#9B9589', fontSize: 12 }}>{eur(btw)}</td></tr>
               <tr style={{ borderTop: '2px solid #131109' }}>
                 <td colSpan={3} style={{ textAlign: 'right', padding: '10px 4px', fontWeight: 700, fontSize: 16 }}>Totaal incl. BTW</td>
@@ -434,13 +484,12 @@ export default function KlusDetailPage({ params }: { params: { id: string } }) {
             </tfoot>
           </table>
           {form.offerte_notities && <div style={{ padding: 12, background: '#F8F7F4', borderRadius: 8, marginBottom: 12, fontSize: 13, color: '#5C574D' }}>{form.offerte_notities}</div>}
-          {profiel?.iban && <div style={{ padding: 12, background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 8, fontSize: 12, color: '#166534', marginBottom: 12 }}>Betaalreferentie: <strong>{klus.klus_nummer || klus.naam}</strong> · IBAN: <strong>{profiel.iban}</strong></div>}
+          {profiel?.iban && <div style={{ padding: 12, background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 8, fontSize: 12, color: '#166534' }}>Betalen o.v.v. <strong>{form.klus_nummer || klus.naam}</strong> op IBAN <strong>{profiel.iban}</strong> t.n.v. {bedrijfsnaam}</div>}
         </div>
       </div>
     )
   }
 
-  // ── MAIN VIEW ─────────────────────────────────────────────────
   return (
     <AppShell>
       <div className="p-4 md:p-8 page-enter">
@@ -469,26 +518,24 @@ export default function KlusDetailPage({ params }: { params: { id: string } }) {
         </div>
 
         {/* Tabs */}
-        <div className="flex gap-1 mb-5 border-b border-ink-100">
+        <div className="flex gap-0 mb-5 border-b border-ink-100">
           {[
             { key: 'gear', label: 'Gear & details' },
             { key: 'offerte', label: `Offerte${hasDirty ? ' ●' : ''}` },
           ].map(t => (
             <button key={t.key}
-              className={clsx('px-4 py-2.5 text-sm font-medium border-b-2 transition-colors',
+              className={clsx('px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors',
                 activeTab === t.key ? 'border-brand-500 text-brand-600' : 'border-transparent text-ink-400 hover:text-ink-700'
               )}
-              onClick={() => setActiveTab(t.key as any)}>
-              {t.label}
-            </button>
+              onClick={() => setActiveTab(t.key as any)}>{t.label}</button>
           ))}
         </div>
 
-        {/* ── TAB: GEAR & DETAILS ───────────────────────────────── */}
+        {/* ── GEAR & DETAILS TAB ─────────────────────────────── */}
         {activeTab === 'gear' && (
           <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
             <div className="lg:col-span-3 space-y-4">
-              {/* Details card */}
+              {/* Details collapsible */}
               <div className="card">
                 <button className="w-full flex items-center justify-between p-4 hover:bg-ink-50 transition-colors rounded-2xl"
                   onClick={() => setEditingDetails(!editingDetails)}>
@@ -496,8 +543,9 @@ export default function KlusDetailPage({ params }: { params: { id: string } }) {
                     <div className="text-sm font-medium text-ink-700">Details klus</div>
                     <div className="text-xs text-ink-400 mt-0.5 flex gap-3 flex-wrap">
                       {busList.map(b => <span key={b.id} className="flex items-center gap-1 text-purple-600"><Truck size={10} />{b.naam}</span>)}
-                      {genList.map(g => <span key={g.id} className="flex items-center gap-1 text-amber-600"><Zap size={10} />{g.naam}</span>)}
-                      {klus.verantwoordelijke && <span>Verantw: {klus.verantwoordelijke}</span>}
+                      {genListSelected.map(g => <span key={g.id} className="flex items-center gap-1 text-amber-600"><Zap size={10} />{g.naam}</span>)}
+                      {klus.verantwoordelijke && <span>Verantw.: {klus.verantwoordelijke}</span>}
+                      {klus.gaffer?.naam && <span>Gaffer: {klus.gaffer.naam}</span>}
                     </div>
                     {form.interne_notities && <div className="text-xs text-yellow-700 bg-yellow-50 rounded px-2 py-0.5 mt-1 inline-block">📝 {form.interne_notities}</div>}
                   </div>
@@ -547,7 +595,7 @@ export default function KlusDetailPage({ params }: { params: { id: string } }) {
                       <FormField label="Gaffer">
                         <select className="input" value={form.gaffer_id} onChange={e => setForm((f: any) => ({ ...f, gaffer_id: e.target.value }))}>
                           <option value="">— geen —</option>
-                          {gaffers.map(g => <option key={g.id} value={g.id}>{g.naam}</option>)}
+                          {gaffers.map(g => <option key={g.id} value={g.id}>{g.naam}{g.dagprijs ? ` — ${eur(g.dagprijs)}/dag` : ''}</option>)}
                         </select>
                       </FormField>
                       <FormField label="Locatie">
@@ -563,21 +611,23 @@ export default function KlusDetailPage({ params }: { params: { id: string } }) {
                       </FormField>
                     </FormGrid>
                     <FormField label="Bussen">
-                      <div className="grid grid-cols-2 gap-2">
+                      <div className="grid grid-cols-1 gap-2">
                         {bussen.map(b => (
                           <label key={b.id} className="flex items-center gap-2 p-2 rounded-lg border border-ink-100 hover:bg-ink-50 cursor-pointer text-sm">
                             <input type="checkbox" checked={form.bus_ids.includes(b.id)} onChange={() => toggleBus(b.id)} />
-                            <span>{b.naam}</span><span className="text-xs text-ink-400 ml-auto">{eur(b.dagprijs)}</span>
+                            <span className="flex-1">{b.naam}</span>
+                            <span className="text-xs text-ink-400">{eur(b.dagprijs)}/dag</span>
                           </label>
                         ))}
                       </div>
                     </FormField>
                     <FormField label="Generators">
-                      <div className="grid grid-cols-2 gap-2">
+                      <div className="grid grid-cols-1 gap-2">
                         {generators.map(g => (
                           <label key={g.id} className="flex items-center gap-2 p-2 rounded-lg border border-ink-100 hover:bg-ink-50 cursor-pointer text-sm">
                             <input type="checkbox" checked={form.generator_info.some((x: any) => x.generator_id === g.id)} onChange={() => toggleGenerator(g.id)} />
-                            <span className="truncate">{g.naam}</span>
+                            <span className="flex-1 truncate">{g.naam}</span>
+                            {g.eigenaar && <span className="text-xs text-ink-400">{g.eigenaar}</span>}
                           </label>
                         ))}
                       </div>
@@ -588,7 +638,7 @@ export default function KlusDetailPage({ params }: { params: { id: string } }) {
                     <div className="flex justify-end gap-2 pt-1">
                       <button className="btn" onClick={() => setEditingDetails(false)}>Annuleren</button>
                       <button className="btn btn-primary" onClick={saveDetails} disabled={saving}>
-                        <Save size={13} /> {saving ? 'Opslaan…' : 'Opslaan'}
+                        <Save size={13} /> {saving ? 'Opslaan…' : 'Opslaan & offerte bijwerken'}
                       </button>
                     </div>
                   </div>
@@ -599,26 +649,23 @@ export default function KlusDetailPage({ params }: { params: { id: string } }) {
               <div className="card p-5">
                 <div className="flex items-center justify-between mb-4">
                   <div className="font-semibold text-sm text-ink-700">{klusGearIds.length} gear items</div>
-                  <div className="text-right">
-                    <div className="font-bold text-lg text-ink-800">{eur(regelSubtotaal - kortingTotaal)}<span className="text-xs text-ink-400 font-normal">/dag excl. BTW</span></div>
-                  </div>
+                  <div className="font-bold text-lg text-ink-800">{eur(excl)}<span className="text-xs text-ink-400 font-normal"> excl. BTW/dag</span></div>
                 </div>
 
-                {/* Bussen */}
+                {/* Bussen bovenaan */}
                 {busList.length > 0 && (
                   <div className="space-y-1 mb-3">
                     {busList.sort((a, b) => a.naam.includes('Atego') ? -1 : 1).map(b => (
                       <div key={b.id} className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl border border-purple-100 bg-purple-50">
-                        <Truck size={14} className="text-purple-500 flex-shrink-0" />
+                        <Truck size={14} className="text-purple-500" />
                         <span className="flex-1 text-sm font-medium text-purple-700">{b.naam}</span>
                         <span className="text-xs font-mono text-purple-500">{eur(b.dagprijs)}/dag</span>
                       </div>
                     ))}
-                    {genList.map(g => (
+                    {genListSelected.map(g => (
                       <div key={g.id} className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl border border-amber-100 bg-amber-50">
-                        <Zap size={14} className="text-amber-500 flex-shrink-0" />
+                        <Zap size={14} className="text-amber-500" />
                         <span className="flex-1 text-sm font-medium text-amber-700">{g.naam}</span>
-                        <span className="text-xs text-amber-500">{g.eigenaar}</span>
                       </div>
                     ))}
                     <div className="border-b border-ink-100 my-2" />
@@ -645,7 +692,7 @@ export default function KlusDetailPage({ params }: { params: { id: string } }) {
                           </div>
                           {onKlus.map(ac => (
                             <div key={ac.id} className="flex items-center gap-2 ml-8 px-3 py-1.5 border-t border-ink-50 group">
-                              <Puzzle size={10} className="text-ink-300 flex-shrink-0" />
+                              <Puzzle size={10} className="text-ink-300" />
                               <span className="flex-1 text-xs text-ink-500">{ac.naam}</span>
                               <span className="text-xs font-mono text-ink-400">{eur(ac.dagprijs)}</span>
                               <button className="btn btn-ghost btn-sm p-1 opacity-0 group-hover:opacity-100" onClick={() => removeAcc(ac.id)}><X size={10} className="text-red-400" /></button>
@@ -694,7 +741,7 @@ export default function KlusDetailPage({ params }: { params: { id: string } }) {
                           <div className="text-[10px] text-ink-400">{g.categorie}{g.eigenaar && ` · ${g.eigenaar}`}</div>
                         </div>
                         <span className="text-xs font-mono text-ink-400">{eur(g.dagprijs)}</span>
-                        {added ? <Check size={13} className="text-green-500 flex-shrink-0" /> : <Plus size={13} className="text-ink-300 flex-shrink-0" />}
+                        {added ? <Check size={13} className="text-green-500" /> : <Plus size={13} className="text-ink-300" />}
                       </div>
                     )
                   })}
@@ -704,16 +751,14 @@ export default function KlusDetailPage({ params }: { params: { id: string } }) {
           </div>
         )}
 
-        {/* ── TAB: OFFERTE ─────────────────────────────────────── */}
+        {/* ── OFFERTE TAB ─────────────────────────────────────── */}
         {activeTab === 'offerte' && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
             <div className="lg:col-span-2">
               <div className="card overflow-hidden">
-                {/* Tabel header */}
                 <div className="grid grid-cols-12 gap-2 px-4 py-2.5 bg-ink-50 border-b border-ink-100 text-xs font-semibold text-ink-400 uppercase tracking-wide">
-                  <div className="col-span-1" />
-                  <div className="col-span-5">Omschrijving</div>
-                  <div className="col-span-2 text-right">Dagprijs / %</div>
+                  <div className="col-span-1" /><div className="col-span-5">Omschrijving</div>
+                  <div className="col-span-2 text-right">Prijs/dag</div>
                   <div className="col-span-1 text-right">Dgn</div>
                   <div className="col-span-2 text-right">Subtotaal</div>
                   <div className="col-span-1" />
@@ -726,11 +771,21 @@ export default function KlusDetailPage({ params }: { params: { id: string } }) {
                       onDragOver={e => { e.preventDefault(); setDragOver(r.id) }}
                       onDrop={e => handleDrop(e, r.id)}
                       onDragLeave={() => setDragOver(null)}
-                      className={clsx('grid grid-cols-12 gap-2 px-4 py-2 items-center group', dragOver === r.id && 'bg-brand-50', r.is_korting_regel && 'bg-green-50')}>
+                      className={clsx('grid grid-cols-12 gap-2 px-4 py-2 items-center group',
+                        dragOver === r.id && 'bg-brand-50',
+                        r.is_korting_regel && 'bg-green-50',
+                        r.type === 'transport' && 'bg-purple-50',
+                        r.type === 'gaffer' && 'bg-blue-50',
+                        r.type === 'generator' && 'bg-amber-50',
+                      )}>
                       <div className="col-span-1"><GripVertical size={13} className="text-ink-200 cursor-grab" /></div>
                       <div className="col-span-5">
                         <input className={clsx('w-full text-sm bg-transparent border-b border-transparent hover:border-ink-200 focus:border-brand-400 outline-none py-0.5',
-                          r.is_korting_regel ? 'text-green-700 font-medium' : r.omschrijving.startsWith('↳') ? 'text-ink-500 italic pl-3' : 'text-ink-800'
+                          r.is_korting_regel ? 'text-green-700 font-medium' :
+                          r.omschrijving.startsWith('↳') ? 'text-ink-500 italic pl-3' :
+                          r.type === 'transport' ? 'text-purple-700 font-medium' :
+                          r.type === 'gaffer' ? 'text-blue-700 font-medium' :
+                          r.type === 'generator' ? 'text-amber-700 font-medium' : 'text-ink-800'
                         )} value={r.omschrijving} onChange={e => updateRegel(r.id, 'omschrijving', e.target.value)} />
                       </div>
                       <div className="col-span-2 flex items-center justify-end gap-1">
@@ -763,10 +818,10 @@ export default function KlusDetailPage({ params }: { params: { id: string } }) {
                 <div className="px-4 py-3 bg-ink-50 border-t border-ink-100 flex gap-2 flex-wrap items-center">
                   <button className="btn btn-sm text-xs" onClick={() => addRegel(false)}><Plus size={12} /> Regel</button>
                   <button className="btn btn-sm text-xs text-green-700 border-green-200 hover:bg-green-50" onClick={() => addRegel(true)}><Plus size={12} /> Korting</button>
-                  <button className="btn btn-sm text-xs text-blue-600 border-blue-200 hover:bg-blue-50" onClick={refreshRegels}>↺ Hergenereren</button>
+                  <button className="btn btn-sm text-xs text-blue-600 border-blue-200 hover:bg-blue-50" onClick={refreshRegels}>↺ Alles hergenereren</button>
                   {hasDirty && (
                     <button className="btn btn-sm btn-primary text-xs ml-auto" onClick={saveRegels} disabled={savingRegels}>
-                      <Save size={12} /> {savingRegels ? '…' : 'Opslaan'}
+                      <Save size={12} /> {savingRegels ? 'Opslaan…' : 'Opslaan'}
                     </button>
                   )}
                 </div>
@@ -774,27 +829,27 @@ export default function KlusDetailPage({ params }: { params: { id: string } }) {
                 {/* Totalen */}
                 <div className="px-4 py-4 border-t-2 border-ink-200 bg-ink-50">
                   <div className="flex justify-end">
-                    <div className="w-64 space-y-1.5 text-sm">
-                      {kortingTotaal > 0 && <>
-                        <div className="flex justify-between text-ink-500"><span>Subtotaal</span><span className="font-mono">{eur(regelSubtotaal)}</span></div>
-                        <div className="flex justify-between text-green-700"><span>Korting</span><span className="font-mono">−{eur(kortingTotaal)}</span></div>
+                    <div className="w-72 space-y-1.5 text-sm">
+                      {kortingSub > 0 && <>
+                        <div className="flex justify-between text-ink-500"><span>Subtotaal</span><span className="font-mono">{eur(regelSub)}</span></div>
+                        <div className="flex justify-between text-green-700"><span>Korting</span><span className="font-mono">−{eur(kortingSub)}</span></div>
                       </>}
-                      <div className="flex justify-between"><span className="text-ink-500">Excl. BTW</span><span className="font-mono font-medium">{eur(excl)}</span></div>
+                      <div className="flex justify-between"><span className="text-ink-500">Excl. BTW</span><span className="font-mono font-semibold">{eur(excl)}</span></div>
                       <div className="flex justify-between text-ink-400 text-xs"><span>BTW 21%</span><span className="font-mono">{eur(btw)}</span></div>
-                      <div className="flex justify-between font-bold text-lg border-t-2 border-ink-800 pt-2"><span>Totaal</span><span className="font-mono">{eur(incl)}</span></div>
+                      <div className="flex justify-between font-bold text-lg border-t-2 border-ink-800 pt-2 mt-2"><span>Totaal incl. BTW</span><span className="font-mono">{eur(incl)}</span></div>
                     </div>
                   </div>
                 </div>
               </div>
             </div>
 
-            {/* Meta */}
+            {/* Offerte meta */}
             <div className="space-y-4">
               <div className="card p-4 space-y-3">
                 <div className="section-title">Offerte instellingen</div>
-                <FormField label="Status offerte">
+                <FormField label="Status">
                   <select className="input text-sm" value={form.offerte_status}
-                    onChange={async e => { setForm((f: any) => ({ ...f, offerte_status: e.target.value })); await supabase.from('klussen').update({ offerte_status: e.target.value }).eq('id', id) }}>
+                    onChange={async e => { const v = e.target.value; setForm((f: any) => ({ ...f, offerte_status: v })); await supabase.from('klussen').update({ offerte_status: v }).eq('id', id) }}>
                     <option value="concept">Concept</option>
                     <option value="verzonden">Verzonden</option>
                     <option value="geaccepteerd">Geaccepteerd</option>
@@ -812,13 +867,13 @@ export default function KlusDetailPage({ params }: { params: { id: string } }) {
                     onChange={e => setForm((f: any) => ({ ...f, offerte_intro: e.target.value }))}
                     onBlur={async e => { await supabase.from('klussen').update({ offerte_intro: e.target.value }).eq('id', id) }} />
                 </FormField>
-                <FormField label="Notities (op offerte)">
+                <FormField label="Notities op offerte">
                   <textarea className="input text-xs h-16 resize-none" value={form.offerte_notities}
                     onChange={e => setForm((f: any) => ({ ...f, offerte_notities: e.target.value }))}
                     onBlur={async e => { await supabase.from('klussen').update({ offerte_notities: e.target.value }).eq('id', id) }} />
                 </FormField>
-                <button className="btn w-full justify-center" onClick={() => setActiveTab('print')}>
-                  <Printer size={13} /> Offerte PDF bekijken
+                <button className="btn w-full justify-center text-sm" onClick={() => setActiveTab('print')}>
+                  <Printer size={13} /> Offerte PDF
                 </button>
               </div>
             </div>
@@ -826,7 +881,6 @@ export default function KlusDetailPage({ params }: { params: { id: string } }) {
         )}
       </div>
 
-      {/* Nieuwe klant modal */}
       {nieuweKlantModal && (
         <div className="modal-overlay" onClick={e => e.stopPropagation()}>
           <div className="modal-box w-full max-w-md" onClick={e => e.stopPropagation()}>
@@ -848,7 +902,8 @@ export default function KlusDetailPage({ params }: { params: { id: string } }) {
         </div>
       )}
 
-      <ConfirmModal open={deleteConfirm} onClose={() => setDeleteConfirm(false)} onConfirm={async () => { await supabase.from('klussen').delete().eq('id', id); router.push('/klussen') }}
+      <ConfirmModal open={deleteConfirm} onClose={() => setDeleteConfirm(false)}
+        onConfirm={async () => { await supabase.from('klussen').delete().eq('id', id); router.push('/klussen') }}
         title="Klus verwijderen?" description={`"${klus.naam}" wordt permanent verwijderd.`} danger />
     </AppShell>
   )
