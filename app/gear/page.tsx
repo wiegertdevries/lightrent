@@ -12,7 +12,7 @@ import type { Gear, Accessory, GearCat, GearStatus } from '@/lib/types'
 import { CAT_EMOJI } from '@/lib/gear-thumbnails'
 import clsx from 'clsx'
 
-const CATS = ['Alle', 'HMI', 'Tungsten', 'LED', 'Textile/Frame', 'Overig']
+const CATS = ['Alle', 'LED', 'HMI', 'Tungsten', 'Textile/Frame', 'Overig']
 
 const CAT_COLORS: Record<string, string> = {
   HMI: 'bg-purple-50 text-purple-700 border-purple-200',

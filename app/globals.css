@@ -64,3 +64,28 @@ body { font-family: 'Inter', system-ui, sans-serif; background: var(--ink-50); c
   body { background: white; }
   .card { box-shadow: none; border: 1px solid #ddd; }
 }
+
+/* ── MOBILE IMPROVEMENTS ─────────────────────────────────── */
+@media (max-width: 768px) {
+  .card { border-radius: 16px; }
+  
+  /* Bigger tap targets on mobile */
+  .btn { min-height: 40px; }
+  .input { min-height: 44px; font-size: 16px; } /* 16px prevents iOS zoom */
+  select.input { font-size: 16px; }
+  
+  /* Full-width modals on mobile */
+  .modal-overlay { align-items: flex-end; padding: 0; }
+  .modal-box { border-radius: 20px 20px 0 0; max-height: 92vh; }
+  
+  /* Better table overflow */
+  table { display: block; overflow-x: auto; }
+}
+
+/* Print styles for offertes/facturen */
+@media print {
+  .no-print, aside, nav, header, .btn, button { display: none !important; }
+  body { background: white !important; }
+  .modal-box { box-shadow: none; border: none; padding: 0; max-height: none; }
+  .modal-overlay { position: static; background: none; display: block; }
+}

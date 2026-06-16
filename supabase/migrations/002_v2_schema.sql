@@ -192,3 +192,40 @@ ALTER TABLE klussen ADD COLUMN IF NOT EXISTS is_sjabloon boolean DEFAULT false;
 -- ── UPDATE GENERATOR EIGENAREN ────────────────────────────────
 UPDATE generators SET eigenaar = 'Gideon' WHERE naam ILIKE '%60KVA%';
 UPDATE generators SET eigenaar = 'Wiegert' WHERE naam ILIKE '%Honda%' OR naam ILIKE '%EU70%';
+
+-- ── GAFFERS tabel ─────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS gaffers (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  naam text NOT NULL,
+  email text,
+  telefoon text,
+  bedrijf text,
+  notities text,
+  created_at timestamptz DEFAULT now()
+);
+ALTER TABLE gaffers ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "gaffers toegang" ON gaffers FOR ALL TO authenticated USING (true) WITH CHECK (true);
+
+-- ── KLUS uitbreidingen ────────────────────────────────────────
+ALTER TABLE klussen ADD COLUMN IF NOT EXISTS gaffer_id uuid REFERENCES gaffers(id) ON DELETE SET NULL;
+ALTER TABLE klussen ADD COLUMN IF NOT EXISTS klus_nummer text;
+ALTER TABLE klussen ADD COLUMN IF NOT EXISTS status_v2 text DEFAULT 'in_optie'; -- 'in_optie'|'bevestigd'|'uitgevoerd'|'gefactureerd'
+
+-- ── PAKLIJST per klus ─────────────────────────────────────────
+-- (paklijst_items tabel already exists from 002_v2_schema.sql)
+-- Add reservebulb tracking
+ALTER TABLE paklijst_items ADD COLUMN IF NOT EXISTS reservebulb_gepakt boolean DEFAULT false;
+
+-- Bus dagprijs update
+UPDATE bussen SET dagprijs = 550 WHERE naam ILIKE '%Atego%';
+
+-- ── NIEUWE GEAR SETS ──────────────────────────────────────────
+-- Titan set van 8
+INSERT INTO gear (naam, categorie, dagprijs, weekprijs, notities) VALUES
+  ('Astera Titan Tube SET (8x)', 'LED', 250, 750, '8 Titan Tubes als complete set'),
+  ('Astera AX9 SET (8x)', 'LED', 250, 750, '8 AX9 PowerPAR als complete set'),
+  ('Astera Helios Tube SET A (4x)', 'LED', 100, 300, '4 Helios Tubes als complete set'),
+  ('Astera Helios Tube SET B (4x)', 'LED', 100, 300, '4 Helios Tubes als complete set'),
+  ('Astera Hydrapanel SET A (4x)', 'LED', 75, 225, '4 Hydrapanels als complete set'),
+  ('Astera Hydrapanel SET B (4x)', 'LED', 75, 225, '4 Hydrapanels als complete set')
+ON CONFLICT DO NOTHING;

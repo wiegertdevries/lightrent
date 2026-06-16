@@ -262,7 +262,7 @@ function OffertesInner() {
             </Thead>
             <Tbody>
               {offertes.map(o => (
-                <Tr key={o.id}>
+                <Tr key={o.id} onClick={() => setViewDoc(o)} className="cursor-pointer">
                   <Td className="font-mono font-medium">{o.nummer}</Td>
                   <Td className="max-w-40 truncate">{o.onderwerp || '—'}</Td>
                   <Td>{(o.klant as any)?.naam || '—'}</Td>
@@ -283,8 +283,7 @@ function OffertesInner() {
                   </Td>
                   <Td className="text-xs text-ink-400">{o.aangemaakt_door_naam || '—'}</Td>
                   <Td>
-                    <div className="flex gap-1">
-                      <button className="btn btn-ghost btn-sm" title="Bekijken" onClick={() => setViewDoc(o)}><Eye size={12} /></button>
+                    <div className="flex gap-1" onClick={e => e.stopPropagation()}>
                       <button className="btn btn-ghost btn-sm" title="Dupliceren" onClick={() => dupliceer(o)}><Copy size={12} /></button>
                       {o.status !== 'omgezet' && (
                         <button className="btn btn-ghost btn-sm" title="Omzetten naar factuur" onClick={() => convertToFactuur(o)}><Receipt size={12} /></button>
@@ -427,7 +426,14 @@ function OffertesInner() {
         <Modal open={!!viewDoc} onClose={() => setViewDoc(null)} title={`Offerte ${viewDoc.nummer}`} width="max-w-3xl"
           footer={
             <>
-              <button className="btn" onClick={() => window.print()}>🖨️ Afdrukken / PDF</button>
+              <button className="btn btn-primary no-print" onClick={() => {
+                const printWindow = window.open('', '_blank')
+                if (printWindow) {
+                  printWindow.document.write(`<html><head><title>Offerte ${viewDoc.nummer}</title><style>body{font-family:Inter,sans-serif;padding:40px;max-width:800px;margin:0 auto}table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid #eee}tfoot tr:last-child td{font-weight:bold;font-size:1.1em;border-top:2px solid #000}.text-right{text-align:right}.italic{font-style:italic}</style></head><body id="print-body"></body></html>`)
+                  printWindow.document.close()
+                  printWindow.print()
+                }
+              }}>🖨️ Afdrukken / PDF</button>
               {viewDoc.algemene_voorwaarden_url && (
                 <a href={viewDoc.algemene_voorwaarden_url} target="_blank" className="btn">
                   <FileText size={13} /> Algemene voorwaarden
